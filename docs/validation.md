@@ -59,7 +59,9 @@ These numbers validate an executable pipeline, not a learned manipulation capabi
 
 An attempted two-process CPU/Gloo run could not initialize its communication transport in the local environment (`Operation not permitted` for the Gloo TCP device). The default hostname rendezvous was also unreachable. No claim of a successful local DDP training run is made.
 
-The GitHub Actions workflow includes a two-process CPU smoke run on a standard hosted runner, in addition to tests and packaging. Its actual run status must be checked separately. Multi-GPU/NCCL execution, full-size bf16 GPU training, throughput, memory consumption, and real-time robot execution remain unmeasured.
+**Hosted CI passed on Python 3.10 and 3.12**, including lint, the offline test suite, end-to-end demo, two-process CPU/Gloo training, and package builds. The verified code commit is `a133e5b6e1eafecc8bf4c6a9ae634713f4099824`; see [GitHub Actions run 43757118487](https://github.com/asilx/wise-vla/actions/runs/43757118487).
+
+This validates the CPU distributed path on GitHub-hosted runners despite the local socket restriction. Multi-GPU/NCCL execution, full-size bf16 GPU training, throughput, memory consumption, and real-time robot execution remain unmeasured.
 
 ## Reproduce
 
