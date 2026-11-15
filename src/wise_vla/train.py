@@ -1,0 +1,293 @@
+"""Single-process or torchrun DDP training with bf16 AMP, EMA and resumable sampling."""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import torch
+import torch.distributed as dist
+import yaml
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler
+
+from .checkpoint import EMA, read_checkpoint, restore_weights, save_checkpoint
+from .config import WISEConfig
+from .data.dataset import EpisodeDataset, PolicyCollator, batch_to
+from .data.normalization import NormalizationStats, fit_stats
+from .model import WISEVLA
+
+
+@dataclass
+class TrainingConfig:
+    manifest: str = "runs/demo/manifest.json"
+    output_dir: str = "runs/wise-vla"
+    train_split: str = "train"
+    batch_size: int = 8
+    max_steps: int = 10000
+    learning_rate: float = 0.0001
+    weight_decay: float = 0.01
+    warmup_steps: int = 500
+    grad_accumulation: int = 1
+    grad_clip: float = 1.0
+    ema_decay: float = 0.999
+    checkpoint_every: int = 1000
+    log_every: int = 10
+    num_workers: int = 0
+    seed: int = 42
+    amp: bool = True
+    normalization: str | None = None
+
+    def __post_init__(self):
+        if (
+            min(
+                self.batch_size,
+                self.max_steps,
+                self.grad_accumulation,
+                self.checkpoint_every,
+                self.log_every,
+            )
+            < 1
+        ):
+            raise ValueError("Training counts must be positive")
+        if self.num_workers < 0 or self.warmup_steps < 0:
+            raise ValueError("Workers/warmup must be nonnegative")
+        if self.learning_rate <= 0 or self.grad_clip <= 0 or self.weight_decay < 0:
+            raise ValueError("Invalid optimizer settings")
+        if not 0 <= self.ema_decay < 1:
+            raise ValueError("Invalid EMA decay")
+
+
+def rng_state(device):
+    return {
+        "cpu": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
+    }
+
+
+def restore_rng(state, device):
+    torch.set_rng_state(state["cpu"])
+    if device.type == "cuda" and state["cuda"] is not None:
+        torch.cuda.set_rng_state(state["cuda"], device)
+
+
+def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop_after=None):
+    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if distributed and not dist.is_initialized():
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+    rank, world = (dist.get_rank(), dist.get_world_size()) if distributed else (0, 1)
+    device = torch.device(
+        f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}" if torch.cuda.is_available() else "cpu"
+    )
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    payload = read_checkpoint(resume) if resume else None
+    if payload:
+        if config.vlm.revision == "main":
+            # Restore the resolved model version before performing any Hub download.
+            config.vlm.revision = payload["config"]["vlm"]["revision"]
+        if config.to_dict() != payload["config"]:
+            raise ValueError("Checkpoint/model configuration mismatch")
+    torch.manual_seed(train.seed)  # identical initial parameters across ranks
+    model = WISEVLA(config).to(device)
+    if payload:
+        restore_weights(model, payload)
+    dataset = EpisodeDataset(train.manifest, config.action.horizon, split=train.train_split)
+    if len(dataset) < world:
+        raise ValueError("Dataset must have at least world_size timesteps")
+    stats = (
+        NormalizationStats(**payload["normalization"])
+        if payload
+        else NormalizationStats.load(train.normalization)
+        if train.normalization
+        else fit_stats(dataset)
+    )
+    sampler = DistributedSampler(
+        dataset, num_replicas=world, rank=rank, shuffle=True, seed=train.seed, drop_last=False
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=train.batch_size,
+        sampler=sampler,
+        num_workers=train.num_workers,
+        collate_fn=PolicyCollator(config, stats),
+        generator=torch.Generator().manual_seed(train.seed),
+        pin_memory=False,
+    )
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(
+        parameters, lr=train.learning_rate, weight_decay=train.weight_decay
+    )
+
+    def schedule(step):
+        if step < train.warmup_steps:
+            return (step + 1) / max(1, train.warmup_steps)
+        progress = (step - train.warmup_steps) / max(1, train.max_steps - train.warmup_steps)
+        return 0.1 + 0.9 * (1 + math.cos(math.pi * min(progress, 1))) / 2
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
+    ema = EMA(model, train.ema_decay)
+    epoch, offset, step = 0, 0, 0
+    manifest_hash = hashlib.sha256(Path(train.manifest).read_bytes()).hexdigest()
+    signature = {
+        k: v
+        for k, v in asdict(train).items()
+        if k not in {"output_dir", "checkpoint_every", "log_every", "normalization"}
+    }
+    if payload:
+        previous = payload["trainer"]
+        if previous["world_size"] != world or previous["training_signature"] != signature:
+            raise ValueError("Resume requires matching world size and training settings")
+        if previous["manifest_sha256"] != manifest_hash:
+            raise ValueError("Dataset manifest changed since checkpoint")
+        optimizer.load_state_dict(payload["optimizer"])
+        scheduler.load_state_dict(payload["scheduler"])
+        ema.shadow = {n: p.to(device) for n, p in payload["ema"].items()}
+        epoch, offset, step = previous["epoch"], previous["batch_offset"], previous["step"]
+    output = Path(train.output_dir)
+    if rank == 0:
+        output.mkdir(parents=True, exist_ok=True)
+        config.save(output / "model_config.yaml")
+        stats.save(output / "normalization.json")
+        (output / "training_config.json").write_text(json.dumps(asdict(train), indent=2))
+        print(
+            json.dumps(
+                {"parameters": model.parameter_counts(), "device": str(device), "world_size": world}
+            ),
+            flush=True,
+        )
+    wrapped = (
+        DistributedDataParallel(
+            model,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            find_unused_parameters=True,
+        )
+        if distributed
+        else model
+    )
+    torch.manual_seed(train.seed + rank)
+    if payload and payload["rng_states"]:
+        restore_rng(payload["rng_states"][rank], device)
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    sampler.set_epoch(epoch)
+    iterator = iter(loader)
+    for _ in range(offset):
+        next(iterator)
+    amp = train.amp and device.type == "cuda"
+    if amp and not torch.cuda.is_bf16_supported():
+        raise ValueError("bf16 AMP requires a supported GPU; set training.amp=false")
+    limit = train.max_steps if stop_after is None else min(stop_after, train.max_steps)
+    latest = output / "latest.pt"
+
+    def checkpoint():
+        local_rng = rng_state(device)
+        states = [None] * world if distributed else [local_rng]
+        if distributed:
+            dist.all_gather_object(states, local_rng)
+        if rank == 0:
+            save_checkpoint(
+                latest,
+                model,
+                stats=stats,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                ema=ema,
+                trainer_state={
+                    "step": step,
+                    "epoch": epoch,
+                    "batch_offset": offset,
+                    "world_size": world,
+                    "training_signature": signature,
+                    "manifest_sha256": manifest_hash,
+                },
+                rng_states=states,
+            )
+        if distributed:
+            dist.barrier()
+
+    while step < limit:
+        metrics = {}
+        for micro in range(train.grad_accumulation):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                epoch, offset = epoch + 1, 0
+                sampler.set_epoch(epoch)
+                iterator = iter(loader)
+                batch = next(iterator)
+            offset += 1
+            batch = batch_to(batch, device)
+            sync_context = (
+                wrapped.no_sync()
+                if distributed and micro < train.grad_accumulation - 1
+                else nullcontext()
+            )
+            with (
+                sync_context,
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp),
+            ):
+                result = wrapped(**batch)
+                loss = result["loss"] / train.grad_accumulation
+            finite = torch.isfinite(loss).to(torch.int32)
+            if distributed:
+                dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+            if not finite:
+                raise FloatingPointError("Non-finite training loss")
+            loss.backward()
+            for key in ("loss", "flow_loss", "relation_loss", "target_loss"):
+                metrics[key] = metrics.get(key, 0) + result[key].detach() / train.grad_accumulation
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            parameters, train.grad_clip, error_if_nonfinite=True
+        )
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+        ema.update(model)
+        step += 1
+        if step % train.log_every == 0 or step == limit:
+            if distributed:
+                for value in metrics.values():
+                    dist.all_reduce(value)
+                    value /= world
+            if rank == 0:
+                row = {key: float(value) for key, value in metrics.items()}
+                row.update(
+                    step=step,
+                    epoch=epoch,
+                    lr=scheduler.get_last_lr()[0],
+                    grad_norm=float(grad_norm),
+                )
+                with (output / "metrics.jsonl").open("a") as stream:
+                    stream.write(json.dumps(row) + "\n")
+                print(json.dumps(row), flush=True)
+        if step % train.checkpoint_every == 0 or step == limit:
+            checkpoint()
+    if step >= limit and not latest.exists() and rank == 0:
+        raise ValueError("No optimizer steps requested and no output checkpoint exists")
+    return latest
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--resume")
+    args = parser.parse_args()
+    values = yaml.safe_load(Path(args.config).read_text())
+    try:
+        run_training(
+            WISEConfig(**values["model"]),
+            TrainingConfig(**values.get("training", {})),
+            resume=args.resume,
+        )
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

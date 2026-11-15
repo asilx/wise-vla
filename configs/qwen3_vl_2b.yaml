@@ -1,0 +1,47 @@
+model:
+  hidden_dim: 384
+  num_heads: 6
+  dropout: 0.0
+  vlm:
+    backend: qwen3_vl
+    model_id: Qwen/Qwen3-VL-2B-Instruct
+    revision: main  # resolved HF commit is persisted in the checkpoint
+    frozen: true
+    dtype: bfloat16
+    max_text_length: 256
+    max_pixels: 262144
+  graph:
+    node_feature_dim: 16
+    num_node_types: 8
+    relations: ["on", inside, near, holding, reachable, part_of, target, blocked_by]
+    layers: 3
+    max_nodes: 64
+    relation_loss_weight: 0.1
+    target_loss_weight: 0.1
+    relation_mask_probability: 0.15
+  action:
+    dim: 7
+    state_dim: 7
+    horizon: 16
+    execute_steps: 4
+    layers: 6
+    inference_steps: 10
+    solver: heun
+    time_sampling: logit_normal
+training:
+  manifest: data/robot/manifest.json
+  output_dir: runs/qwen3-2b
+  train_split: train
+  batch_size: 2
+  max_steps: 20000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_steps: 500
+  grad_accumulation: 4
+  grad_clip: 1.0
+  ema_decay: 0.999
+  checkpoint_every: 1000
+  log_every: 10
+  num_workers: 0
+  amp: true
+  seed: 42

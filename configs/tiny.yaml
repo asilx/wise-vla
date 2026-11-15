@@ -1,0 +1,28 @@
+model:
+  hidden_dim: 64
+  num_heads: 4
+  vlm:
+    backend: tiny
+    tiny_dim: 32
+    dtype: float32
+  graph:
+    layers: 2
+    max_nodes: 16
+  action:
+    dim: 7
+    state_dim: 7
+    horizon: 8
+    execute_steps: 2
+    layers: 2
+    inference_steps: 3
+training:
+  manifest: runs/demo/manifest.json
+  output_dir: runs/tiny
+  batch_size: 4
+  max_steps: 100
+  learning_rate: 0.001
+  warmup_steps: 5
+  ema_decay: 0.9
+  log_every: 10
+  checkpoint_every: 25
+  num_workers: 0

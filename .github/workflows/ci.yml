@@ -1,0 +1,27 @@
+name: tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e '.[dev,serve]' transformers==4.57.6
+      - run: ruff check src tests examples
+      - run: pytest -q -m 'not integration'
+      - run: wise-vla-demo --output runs/ci-demo --train-steps 6
+      - run: torchrun --standalone --nproc-per-node=2 examples/ddp_smoke.py --manifest runs/ci-demo/manifest.json --output runs/ci-ddp
+        env:
+          OMP_NUM_THREADS: '1'
+      - run: python -m build
