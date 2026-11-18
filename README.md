@@ -26,7 +26,7 @@ flowchart TD
 - Training combines masked conditional flow matching, masked relation reconstruction, and optional target-object supervision.
 - Inference encodes the observation once per chunk and integrates the velocity field with Euler or Heun steps. A policy wrapper supports receding-horizon execution and replans when the graph or instruction changes.
 
-See [architecture and equations](docs/architecture.md), [data format](docs/data.md), [training](docs/training.md), and the [Turkish reading guide](docs/okuma_rehberi_tr.md).
+See [architecture and equations](docs/architecture.md), [data format](docs/data.md), and [training](docs/training.md).
 
 ## Quick start: no GPU or model download
 
@@ -50,6 +50,19 @@ python examples/infer_episode.py \
   --checkpoint runs/demo/checkpoints/latest.pt \
   --manifest runs/demo/manifest.json --frames 5
 ```
+
+## Train on a LeRobot recording
+
+Import complete episodes from a local LeRobot v3.0 dataset. This SO-100 example uses two cameras, six state and action channels, and the small CPU policy.
+
+```bash
+pip install -e '.[lerobot]'
+wise-vla-import-lerobot data/so100-source data/so100-wise --train-episodes 0 --val-episodes 1
+wise-vla-train --config configs/so100_smoke.yaml
+wise-vla-eval --checkpoint runs/so100-smoke/latest.pt --manifest data/so100-wise/manifest.json --split val --device cpu --batch-size 8
+```
+
+The importer aligns each camera using its episode offset and recorded frame timestamps. Pass `--graphs` to attach knowledge-graph snapshots to individual frames. See [the pinned SO-100 download and annotation format](docs/data.md#lerobot-v30-import).
 
 ## Train with the pretrained VLM
 
@@ -116,7 +129,7 @@ Graph topology, typed predicates, node attributes, and label embeddings particip
 | Included | Requires further work/data |
 |---|---|
 | VLM integration and trainable graph/action network | Training graph/action weights on robot demonstrations |
-| Episodic loader, masks, training-only statistics | Converting a chosen robot dataset and supplying graph annotations |
+| LeRobot v3.0 import, frame-aligned graph annotations, masks, training-only statistics | Collecting grounded annotations for a target task |
 | AdamW, accumulation, bf16 AMP, DDP, EMA, resumable checkpoints | GPU throughput/memory profiling and large-scale training |
 | Offline action metrics and graph ablation | Simulator/robot rollouts and success/recovery evaluation |
 | Python and local HTTP inference | Robot-specific observation adapter, controller, and safety validation |
@@ -132,7 +145,9 @@ See [validation record](docs/validation.md) for exactly what has been executed. 
 | `src/wise_vla/nn/graph_encoder.py` | Directed relational attention and graph auxiliary heads |
 | `src/wise_vla/nn/action_expert.py` | Continuous action transformer |
 | `src/wise_vla/model.py` | Policy composition, losses, flow integration |
-| `src/wise_vla/data/` | Episode loading, chunk masking, statistics |
+| `src/wise_vla/data/lerobot.py` | Importing LeRobot v3.0 recordings and frame-indexed graph snapshots |
+| `src/wise_vla/data/dataset.py` | Episode loading, action-chunk masking and policy batching |
+| `src/wise_vla/data/normalization.py` | Training-split state and action statistics |
 | `src/wise_vla/train.py` | Training and exact sampling-position resume |
 | `src/wise_vla/checkpoint.py` | Atomic checkpoints, EMA, policy loading |
 | `src/wise_vla/policy.py` | Denormalization and action queue |

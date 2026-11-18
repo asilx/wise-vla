@@ -1,0 +1,28 @@
+model:
+  hidden_dim: 64
+  num_heads: 4
+  vlm:
+    backend: tiny
+    tiny_dim: 32
+    dtype: float32
+  graph:
+    layers: 2
+    max_nodes: 16
+  action:
+    dim: 6
+    state_dim: 6
+    horizon: 8
+    execute_steps: 2
+    layers: 2
+    inference_steps: 3
+training:
+  manifest: data/so100-wise/manifest.json
+  output_dir: runs/so100-smoke
+  batch_size: 4
+  max_steps: 8
+  learning_rate: 0.001
+  warmup_steps: 2
+  ema_decay: 0.9
+  log_every: 2
+  checkpoint_every: 8
+  num_workers: 0

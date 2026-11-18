@@ -1,6 +1,22 @@
-# Validation record — 2026-11-15
+# Validation record
 
-## Executed locally
+## SO-100 LeRobot import and training (2026-11-18)
+
+The public SO-100 pick-and-place recording was imported at revision `728583b5eaf9e739a7f119e2def466fa1d552402` using PyArrow 23.0.1 and PyAV 16.1.0. Both cameras share their respective video files across episodes. [Recording and reproduction commands](data.md#reproduce-the-so-100-example)
+
+| Check | Observed result |
+|---|---|
+| Episode split | Episode 0 supplied 454 training observations. Episode 1 supplied 468 validation observations. |
+| Source alignment | All 922 rows matched the source states, actions, timestamps, frame indices and task instructions. |
+| Camera alignment | All 1,844 exported RGB images matched a separate sequential decode from the start of the two source videos, pixel for pixel. |
+| Train and evaluate | Eight CPU optimizer steps using `configs/so100_smoke.yaml`. The EMA checkpoint evaluated on all 468 validation observations, with 22,296 valid action scalars and normalized action MSE 2.527864. |
+| Sparse graphs | Automated fixtures exercise exact-frame joins, absent annotations, custom relations and delivery of target labels through the policy collator. |
+| Qwen preprocessing | The official Qwen3-VL processor batched the last training frame and first validation frame into four image grids and a token tensor of shape `[2, 504]`. |
+| Local suite and packaging | 46 tests passed. The opt-in full 2B weight test was skipped. Ruff, wheel and source distribution builds passed. |
+
+The SO-100 run used the randomly initialized tiny backbone and empty graphs. It measures offline imitation error. Establishing a graph benefit requires annotated demonstrations, and measuring task success requires rollouts.
+
+## CPU model validation (2026-11-15)
 
 Environment: Python 3.12.14, PyTorch 2.7.1+cpu, Transformers 4.57.6. CUDA was not available.
 

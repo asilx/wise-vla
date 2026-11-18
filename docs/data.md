@@ -74,17 +74,46 @@ Record the following alongside each dataset: ordered channel names, units, coord
 
 Statistics are fitted on the training split only and count each raw timestep once. Padded action dimensions are excluded. Every dimension needs at least one valid training observation. Standard deviations have a `1e-3` floor; this is affine z-score normalization, not quantile clipping. Graph geometry keeps its documented physical units.
 
-## Importing existing robotics data
+## LeRobot v3.0 import
 
-The format is deliberately independent of a specific simulator or LeRobot version. An importer should:
+`wise-vla-import-lerobot` reads a local LeRobot v3.0 dataset with per-episode metadata, task text, one-dimensional `observation.state` and `action` features, and at least one RGB camera. It accepts shared video files and Parquet image features containing bytes or a path relative to the source root. The resulting manifest works with the existing WISE training, evaluation, and inference commands. [LeRobot v3 format](https://huggingface.co/docs/lerobot/lerobot-dataset-v3)
 
-1. Split complete episodes into train/validation sets.
-2. Export aligned numeric arrays and RGB frames.
-3. Export one observation record per timestep.
-4. Populate graphs from simulator ground truth, perception/tracking, human annotation, or an external knowledge system.
-5. Verify frame, unit and time alignment before training.
+### Reproduce the SO-100 example
 
-No automatic LeRobot, RLDS, ROS or Isaac importer is included in v0.1. The source arrays can be written with `np.save(..., allow_pickle=False)`. `wise-vla-demo` creates a complete runnable example of this contract. `examples/world_graph.py` illustrates the runtime graph API. Supplying an empty graph is supported for a VLM-only starting dataset, but it does not teach graph use.
+From the repository root, use the Hugging Face CLI to download the shards containing episodes 0 and 1 of the public pick-and-place recording. Both episodes share the data and video files. The pinned revision contains the camera views `observation.images.top` and `observation.images.wrist`. [Source recording](https://huggingface.co/datasets/lerobot/svla_so100_pickplace/tree/728583b5eaf9e739a7f119e2def466fa1d552402)
+
+```bash
+pip install -e '.[lerobot]' huggingface_hub
+hf download lerobot/svla_so100_pickplace meta/info.json meta/tasks.parquet \
+  meta/episodes/chunk-000/file-000.parquet data/chunk-000/file-000.parquet \
+  videos/observation.images.top/chunk-000/file-000.mp4 \
+  videos/observation.images.wrist/chunk-000/file-000.mp4 \
+  --repo-type dataset --revision 728583b5eaf9e739a7f119e2def466fa1d552402 \
+  --local-dir data/so100-source
+wise-vla-import-lerobot data/so100-source data/so100-wise --train-episodes 0 --val-episodes 1
+wise-vla-train --config configs/so100_smoke.yaml
+wise-vla-eval --checkpoint runs/so100-smoke/latest.pt \
+  --manifest data/so100-wise/manifest.json --split val --device cpu --batch-size 8
+```
+
+The example runs eight optimizer steps with the offline backbone and a horizon of eight six-channel actions. For a different robot, use its state and action widths in the model configuration. The importer writes the source feature descriptions, camera keys and frame rate to `manifest.json`, and saves raw state and action values as float32 in source channel order. Control semantics and physical units come from the recording.
+
+### Select episodes and cameras
+
+- `--train-episodes 0:8,12 --val-episodes 8:10` assigns source IDs 0–7 and 12 to training, 8 and 9 to validation. Ranges exclude the upper endpoint. IDs must be unique across both lists.
+- By default, all declared RGB cameras are imported. For a single view, pass e.g. `--cameras observation.images.wrist`. Each observation keeps the original camera keys. The policy orders views by key when batching.
+- The importer reads each camera's own shard and episode start time, adds the row's episode-relative timestamp and checks the decoded video presentation time. It writes RGB PNGs and preserves the original timestamp in `observations.jsonl`. Missing or misaligned frames abort the import.
+- Use a new output directory. The final manifest and episode directories appear together once every selected episode passes validation. Decoded PNGs can occupy more disk space than the source videos.
+
+### Attach knowledge-graph snapshots
+
+Pass `--graphs annotations` during import. Create `annotations/episode_000001.jsonl` for source episode 1, with one record per annotated frame. This example marks the cube as the supervised target at frame 12. The 16 features follow the ordering above.
+
+```json
+{"frame_index":12,"graph":{"nodes":[{"id":"cube","label":"cube","type":1,"features":[0.1,0.2,0.3,0,0,0,1,0.04,0.04,0.04,0.98,0,0.2,0.3,0.4,0.6]}],"edges":[],"target_id":"cube"}}
+```
+
+Frame indices are zero-based within the source episode. Supply geometry and relations observed at that timestep. A frame without an annotation receives an empty graph, including frames in episodes with no annotation file. Each annotation applies to exactly one frame. The importer records the number of annotated frames per episode and validates every supplied snapshot with the policy's graph tensorizer. Pass `--config path/to/model.yaml` to use a custom graph schema. See [a runtime graph construction example](../examples/world_graph.py).
 
 ## Temporal limitations
 
