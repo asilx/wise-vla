@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Knowledge-graph-native flow-matching vision-language-action policy for Grounded Forge"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Grounded Forge"}]
 dependencies = ["torch>=2.5,<3", "numpy>=1.26,<3", "Pillow>=10", "PyYAML>=6"]
 

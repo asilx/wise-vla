@@ -161,4 +161,6 @@ This is an independent implementation. Architectural ingredients are established
 - [Transformers Qwen3-VL API](https://huggingface.co/docs/transformers/v4.57.0/en/model_doc/qwen3_vl)
 - [π0: A Vision-Language-Action Flow Model for General Robot Control](https://www.physicalintelligence.company/download/pi0.pdf)
 
-No source-code license has been selected for this repository. Third-party dependencies and pretrained weights retain their respective licenses; the Qwen model card lists Apache-2.0 for its weights.
+## License
+
+WISE-VLA is released under the [MIT License](LICENSE). Third-party dependencies and pretrained weights are covered by their own licenses.
