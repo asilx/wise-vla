@@ -51,6 +51,20 @@ python examples/infer_episode.py \
   --manifest runs/demo/manifest.json --frames 5
 ```
 
+## Measure graph use in closed loop
+
+Two closed bins and a cursor appear in a simulated overhead view. The instruction is always “Reach the closed bin containing the part.” Each test layout is run twice, once per possible bin. Only the destination of the graph's `inside` edge tells the policy where to go. A second pair of rollouts removes that edge and preserves the nodes and initial observations.
+
+```bash
+export OMP_NUM_THREADS=1
+wise-vla-graph-reach generate --output runs/graph-reach/data
+wise-vla-train --config configs/graph_reach.yaml
+wise-vla-graph-reach evaluate --checkpoint runs/graph-reach/checkpoints/latest.pt \
+  --pairs 64 --seed 2026 --output runs/graph-reach/rollouts.json
+```
+
+The CPU recipe uses the tiny backbone, 32 training layouts (64 demonstrations), and the existing PyTorch trainer. The generator also writes eight validation layouts. Evaluation samples a separate test set. The report gives success per episode and the fraction of layouts on which the policy reaches **both** correct goals when the relation switches. [Experiment and results](docs/validation.md#closed-loop-graph-reach-2026-11-22)
+
 ## Train on a LeRobot recording
 
 Import complete episodes from a local LeRobot v3.0 dataset. This SO-100 example uses two cameras, six state and action channels, and the small CPU policy.
@@ -131,7 +145,7 @@ Graph topology, typed predicates, node attributes, and label embeddings particip
 | VLM integration and trainable graph/action network | Training graph/action weights on robot demonstrations |
 | LeRobot v3.0 import, frame-aligned graph annotations, masks, training-only statistics | Collecting grounded annotations for a target task |
 | AdamW, accumulation, bf16 AMP, DDP, EMA, resumable checkpoints | GPU throughput/memory profiling and large-scale training |
-| Offline action metrics and graph ablation | Simulator/robot rollouts and success/recovery evaluation |
+| Offline imitation metrics and paired 2D graph-conditioned rollouts | Manipulation success and recovery on a robot or physics simulator |
 | Python and local HTTP inference | Robot-specific observation adapter, controller, and safety validation |
 
 See [validation record](docs/validation.md) for exactly what has been executed. Test assertions about dependence on the graph do not establish improved task performance. Action bounds are optional numerical checks, not collision avoidance or certified safety.

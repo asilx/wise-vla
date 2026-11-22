@@ -108,3 +108,11 @@ WISE_VLA_PRETRAINED_TEST=1 pytest -q tests/test_qwen_adapter.py -k cached_pretra
 ```
 
 The processor test uses official preprocessing with a reduced randomly initialized Qwen network. The cached-pretrained test is the only test that loads the actual 2B pretrained weights. Consult `docs/validation.md` before assuming either was executed on a particular machine.
+
+## Graph reach protocol
+
+The task state is the cursor's absolute `(x, y)` position in a unit square. Actions are displacements in the same coordinates. The simulator limits the Euclidean step length to 0.08, clips positions to the workspace, then renders the updated view. The first bin center within radius 0.065 ends the episode. The correct bin gives success, the other gives a wrong-bin outcome, and 16 steps without either gives a timeout.
+
+The expert moves directly toward the bin containing the hidden part. Paired demonstrations share the starting position, bin geometry, image and instruction. The saved `target_id` supplies the trainer's auxiliary classification loss. The online policy receives only the three nodes and, in the full condition, the directed `inside` edge. Relation masking is disabled for this task because that single edge specifies the goal.
+
+The evaluator resets the action queue for every rollout and uses the same per-step sampling seeds for all four trials in a layout. Train, validation and test layouts use separate random streams. With both possible goals, an edge-free policy following the same trajectory can succeed on at most one of the two episodes. A score of 1 for `both_goals_reached_rate` requires reaching each destination when its turn comes. The JSON report records each trial's condition, goal, outcome and step count. [Run the CPU example](../README.md#measure-graph-use-in-closed-loop)

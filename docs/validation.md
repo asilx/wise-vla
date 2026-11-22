@@ -1,5 +1,16 @@
 # Validation record
 
+## Closed-loop graph reach (2026-11-22)
+
+One tiny CPU policy trained for 1,200 optimizer steps on expert trajectories from 32 paired layouts. The graph provided the part's container through an `inside` relation. The target-node loss used the expert's bin ID with weight 0.25. The evaluation policy received no target ID. Generation and training used seed 42. The EMA checkpoint ran on 64 new layouts with seed 2026, with both possible goals in every layout. [Reproduction commands](../README.md#measure-graph-use-in-closed-loop)
+
+| Check | Full graph | Same nodes with the edge removed |
+|---|---:|---:|
+| Correct bin reached before the wrong bin or timeout | 33 / 128 (25.8%) | 33 / 128 (25.8%) |
+| Both goal assignments solved on the same layout | 0 / 64 | 0 / 64 |
+
+The target head identified the correct bin in all 79 observations of the separate offline validation split. In the closed-loop task the action policy showed no success-rate gain from the relation in this run. An oracle regression test using the same interface reaches both goals in every tested pair when supplied the relation. These results cover synthetic 2D reaching and one trained checkpoint.
+
 ## SO-100 LeRobot import and training (2026-11-18)
 
 The public SO-100 pick-and-place recording was imported at revision `728583b5eaf9e739a7f119e2def466fa1d552402` using PyArrow 23.0.1 and PyAV 16.1.0. Both cameras share their respective video files across episodes. [Recording and reproduction commands](data.md#reproduce-the-so-100-example)
