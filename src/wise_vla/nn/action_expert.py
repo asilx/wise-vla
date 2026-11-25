@@ -62,7 +62,9 @@ class ActionExpert(nn.Module):
     def forward(self, noisy_actions, t, state, context, valid):
         x = self.action_in(torch.where(valid, noisy_actions, 0))
         condition = self.time(t) + self.state_in(state)
-        # Preserve a direct time/state path even at zero-initialized AdaLN modulation.
+        if context.target_condition is not None:
+            condition = condition + context.target_condition
+        # Preserve a direct conditioning path even at zero-initialized AdaLN modulation.
         x = x + condition[:, None]
         step_mask = valid.any(-1)
         for block in self.blocks:

@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from wise_vla.graph import GraphTensorizer, WorldGraph
+from wise_vla.model import WISEVLA
 
 
 def test_multi_relational_directed_edges(config, snapshot):
@@ -37,8 +38,9 @@ def test_graph_rejects_invalid(config, snapshot, mutation):
         GraphTensorizer(config.graph)([snapshot])
 
 
-def test_permutation_equivariance_and_direction(model, batch):
-    model.eval()
+def test_permutation_equivariance_and_direction(config, batch):
+    config.action.condition_on_target = True
+    model = WISEVLA(config).eval()
     graph = batch["graph"]
     original = model.encode(batch["vlm_inputs"], graph)
     perm = torch.tensor([1, 0])
@@ -60,6 +62,7 @@ def test_permutation_equivariance_and_direction(model, batch):
     torch.testing.assert_close(
         original.target_logits[:, perm], result.target_logits, atol=1e-5, rtol=1e-5
     )
+    torch.testing.assert_close(original.target_condition, result.target_condition)
     reversed_graph = graph.with_edges(graph.edges.transpose(1, 2))
     assert not torch.allclose(
         original.graph, model.encode(batch["vlm_inputs"], reversed_graph).graph

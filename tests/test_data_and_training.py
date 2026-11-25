@@ -83,7 +83,9 @@ def test_ema_context_restores_even_on_error(model):
     torch.testing.assert_close(parameter, original + 2)
 
 
-def test_training_resume_matches_uninterrupted(config, dataset, tmp_path):
+@pytest.mark.parametrize("condition_on_target", [False, True])
+def test_training_resume_matches_uninterrupted(config, dataset, tmp_path, condition_on_target):
+    config.action.condition_on_target = condition_on_target
     settings = TrainingConfig(
         manifest=str(dataset.manifest),
         output_dir=str(tmp_path / "full"),
@@ -98,6 +100,13 @@ def test_training_resume_matches_uninterrupted(config, dataset, tmp_path):
     full = run_training(copy.deepcopy(config), settings)
     partial_settings = replace(settings, output_dir=str(tmp_path / "resumed"))
     partial = run_training(copy.deepcopy(config), partial_settings, stop_after=3)
+    if not condition_on_target:
+        # A format-v1 checkpoint written before the optional target readout existed.
+        legacy = read_checkpoint(partial)
+        del legacy["config"]["action"]["condition_on_target"]
+        torch.save(legacy, partial)
+        old_model, _ = load_policy_model(partial)
+        assert old_model.target_projection is None
     resumed = run_training(copy.deepcopy(config), partial_settings, resume=partial)
     a, b = read_checkpoint(full), read_checkpoint(resumed)
     assert a["trainer"]["step"] == b["trainer"]["step"] == 6

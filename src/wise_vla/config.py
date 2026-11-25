@@ -53,6 +53,7 @@ class ActionConfig:
     inference_steps: int = 10
     solver: str = "heun"
     time_sampling: str = "logit_normal"
+    condition_on_target: bool = False
 
 
 @dataclass
@@ -100,6 +101,8 @@ class WISEConfig:
             raise ValueError("solver must be euler or heun")
         if self.action.time_sampling not in {"uniform", "logit_normal"}:
             raise ValueError("time_sampling must be uniform or logit_normal")
+        if not isinstance(self.action.condition_on_target, bool):
+            raise ValueError("condition_on_target must be a boolean")
         if not 0 <= self.dropout < 1 or not 0 <= self.graph.relation_mask_probability <= 1:
             raise ValueError("Invalid dropout or relation mask probability")
         if min(self.graph.relation_loss_weight, self.graph.target_loss_weight) < 0:

@@ -111,6 +111,7 @@ def test_bare_model_loads_conditional_generation_checkpoint(config, batch, tmp_p
 def test_official_processor_with_reduced_qwen(config, samples):
     """Official tokenizer/template/image preprocessing, small random Qwen network."""
     location = os.environ["WISE_VLA_PROCESSOR_DIR"]
+    config.action.condition_on_target = True
     config.vlm = VLMConfig(
         backend="qwen3_vl",
         model_id=location,

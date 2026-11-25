@@ -87,7 +87,7 @@ def read_checkpoint(path):
 
 
 def restore_weights(model, payload, *, use_ema=False):
-    if model.config.to_dict() != payload["config"]:
+    if model.config != WISEConfig(**payload["config"]):
         raise ValueError("Checkpoint/model configuration mismatch")
     incompat = model.load_state_dict(payload["model"], strict=False)
     allowed_missing = {name for name in model.state_dict() if name.startswith("backbone.")}

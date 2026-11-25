@@ -90,7 +90,7 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
         if config.vlm.revision == "main":
             # Restore the resolved model version before performing any Hub download.
             config.vlm.revision = payload["config"]["vlm"]["revision"]
-        if config.to_dict() != payload["config"]:
+        if config != WISEConfig(**payload["config"]):
             raise ValueError("Checkpoint/model configuration mismatch")
     torch.manual_seed(train.seed)  # identical initial parameters across ranks
     model = WISEVLA(config).to(device)

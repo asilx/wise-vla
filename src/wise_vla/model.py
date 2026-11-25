@@ -21,6 +21,7 @@ class PolicyContext:
     graph: Tensor
     graph_mask: Tensor
     target_logits: Tensor
+    target_condition: Tensor | None = None
 
 
 class WISEVLA(nn.Module):
@@ -41,6 +42,11 @@ class WISEVLA(nn.Module):
         )
         self.graph_encoder = GraphEncoder(config)
         self.action_expert = ActionExpert(config)
+        self.target_projection = (
+            nn.Linear(config.graph.node_feature_dim, dim, bias=False)
+            if config.action.condition_on_target
+            else None
+        )
 
     def encode(self, vlm_inputs: dict, graph: GraphBatch) -> PolicyContext:
         features = self.backbone(vlm_inputs)
@@ -49,7 +55,13 @@ class WISEVLA(nn.Module):
         semantics = self.semantic_projection(features.node_semantics.to(dtype))
         nodes, mask = self.graph_encoder(graph, semantics, visual, features.mask)
         targets = self.graph_encoder.target_logits(nodes, mask, visual, features.mask)
-        return PolicyContext(visual, features.mask, nodes, mask, targets)
+        target_condition = None
+        if self.target_projection is not None:
+            # Logits already mask padded nodes. On empty graphs discard all probability mass.
+            weights = targets.softmax(dim=-1, dtype=torch.float32).masked_fill(~graph.node_mask, 0)
+            attributes = (weights.unsqueeze(-1) * graph.features).sum(dim=1)
+            target_condition = self.target_projection(attributes.to(dtype))
+        return PolicyContext(visual, features.mask, nodes, mask, targets, target_condition)
 
     def _valid_actions(self, actions, mask):
         expected = (actions.shape[0], self.config.action.horizon, self.config.action.dim)
@@ -180,6 +192,7 @@ class WISEVLA(nn.Module):
         if ablate_graph:
             context.graph = torch.zeros_like(context.graph[:, :1])
             context.graph_mask = torch.ones_like(context.graph_mask[:, :1])
+            context.target_condition = None
         dt = 1.0 / steps
         for i in range(steps):
             time = torch.full((b,), i * dt, device=state.device)

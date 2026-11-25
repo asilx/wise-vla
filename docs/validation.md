@@ -1,5 +1,22 @@
 # Validation record
 
+## Predicted-target conditioning (2026-11-25)
+
+The question was whether feeding the predicted target's numeric attributes to the action expert would help it act on the `inside` relation. The control already had the same target head, target labels during training and graph-token attention. We switched on `model.action.condition_on_target` for the intervention. This adds 1,024 weights in the tiny model. Both versions used the same 64 demonstrations, training budget (1,200 optimizer steps), EMA settings and action sampler.
+
+Each rollout seed generates 64 test layouts. Each layout has two possible goals. Within a layout all conditions share the initial state, camera view and per-step sampling seeds. We compared two training seeds on the original test layouts and a fresh set. The training-seed-42 control used the checkpoint from the previous experiment. Its original per-episode report reproduced exactly with the updated loader.
+
+| Training seed | Rollout seed | Success, control (full / no edges), out of 128 | Success, target-conditioned (full / no edges), out of 128 | Both goals solved with full graph (control / target-conditioned), out of 64 |
+|---:|---:|---:|---:|---:|
+| 42 | 2026 | 33 / 33 | 89 / 0 | 0 / 32 |
+| 43 | 2026 | 32 / 32 | 91 / 0 | 0 / 34 |
+| 42 | 20261125 | 40 / 40 | 91 / 0 | 0 / 33 |
+| 43 | 20261125 | 40 / 40 | 92 / 3 | 0 / 34 |
+
+With the full graph the target-conditioned policies reached the correct bin in 363 of 512 episodes (70.9%). All 149 remaining episodes reached the 16-step timeout. The controls succeeded in 145 of 512 (28.3%). Removing the relation reduced target-conditioned success to 3 of 512. On the 79 offline validation observations, all four checkpoints selected the correct target node. These measurements cover synthetic 2D reaching with the tiny backbone.
+
+To reproduce a row, use the graph-reach recipe with its indicated `training.seed`, a separate output directory per checkpoint, and the indicated evaluation seed with `--pairs 64`. Set `model.action.condition_on_target` to `false` for the control. Layout generation uses seed 42 throughout. [Run the experiment](../README.md#measure-graph-use-in-closed-loop)
+
 ## Closed-loop graph reach (2026-11-22)
 
 One tiny CPU policy trained for 1,200 optimizer steps on expert trajectories from 32 paired layouts. The graph provided the part's container through an `inside` relation. The target-node loss used the expert's bin ID with weight 0.25. The evaluation policy received no target ID. Generation and training used seed 42. The EMA checkpoint ran on 64 new layouts with seed 2026, with both possible goals in every layout. [Reproduction commands](../README.md#measure-graph-use-in-closed-loop)

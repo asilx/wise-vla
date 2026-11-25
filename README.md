@@ -22,7 +22,7 @@ flowchart TD
 - Multi-camera RGB and language are encoded by Qwen3-VL. Its weights are frozen by default.
 - Nodes carry geometry, object type, confidence, age, a bounding box, and semantic label embeddings from the VLM's token embedding table.
 - Each graph block uses forward/reverse relation attention biases, typed relation messages, and visual cross-attention. Multiple predicates can connect the same ordered pair.
-- Every action block directly cross-attends to graph tokens and VLM tokens. Action attention uses RoPE, QK normalization, RMSNorm, SwiGLU, and time/state conditioning with adaptive modulation.
+- Every action block directly cross-attends to graph tokens and VLM tokens. Action attention uses RoPE, QK normalization, RMSNorm, SwiGLU, and time/state conditioning with adaptive modulation. The optional `model.action.condition_on_target` path also conditions each action on the numeric attributes of the predicted target.
 - Training combines masked conditional flow matching, masked relation reconstruction, and optional target-object supervision.
 - Inference encodes the observation once per chunk and integrates the velocity field with Euler or Heun steps. A policy wrapper supports receding-horizon execution and replans when the graph or instruction changes.
 
@@ -55,15 +55,17 @@ python examples/infer_episode.py \
 
 Two closed bins and a cursor appear in a simulated overhead view. The instruction is always “Reach the closed bin containing the part.” Each test layout is run twice, once per possible bin. Only the destination of the graph's `inside` edge tells the policy where to go. A second pair of rollouts removes that edge and preserves the nodes and initial observations.
 
+If you already have `runs/graph-reach/data/manifest.json` from the original experiment, start with the training command to reuse those demonstrations.
+
 ```bash
 export OMP_NUM_THREADS=1
 wise-vla-graph-reach generate --output runs/graph-reach/data
 wise-vla-train --config configs/graph_reach.yaml
-wise-vla-graph-reach evaluate --checkpoint runs/graph-reach/checkpoints/latest.pt \
-  --pairs 64 --seed 2026 --output runs/graph-reach/rollouts.json
+wise-vla-graph-reach evaluate --checkpoint runs/graph-reach/target-conditioned/latest.pt \
+  --pairs 64 --seed 2026 --output runs/graph-reach/target-conditioned/rollouts.json
 ```
 
-The CPU recipe uses the tiny backbone, 32 training layouts (64 demonstrations), and the existing PyTorch trainer. The generator also writes eight validation layouts. Evaluation samples a separate test set. The report gives success per episode and the fraction of layouts on which the policy reaches **both** correct goals when the relation switches. [Experiment and results](docs/validation.md#closed-loop-graph-reach-2026-11-22)
+The CPU recipe enables predicted-target conditioning and uses the tiny backbone with 32 training layouts (64 demonstrations). The generator also writes eight validation layouts. Evaluation samples a separate test set. The report gives success per episode and the fraction of layouts on which the policy reaches **both** correct goals when the relation switches. [Matched baseline and target-conditioned rollouts](docs/validation.md#predicted-target-conditioning-2026-11-25)
 
 ## Train on a LeRobot recording
 

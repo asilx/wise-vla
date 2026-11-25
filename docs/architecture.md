@@ -42,6 +42,17 @@ Each block has:
 
 Time/state embeddings also enter the initial action representation directly, preserving conditioning from the first optimization step. Graph/VLM gates start nonzero, so graph gradients are available immediately. The action sequence is bidirectional because an entire future chunk is generated jointly.
 
+With `model.action.condition_on_target: true`, the target head supplies an additional conditioning vector. Let `pᵢ` be the softmax of its predicted scores over the real nodes and `fᵢ` the numeric attributes of node `i` from the graph snapshot. A learned linear projection maps their weighted average to the action model's width.
+
+```text
+target_condition = W · Σᵢ pᵢ fᵢ
+condition = time_embedding(t) + state_embedding(s) + target_condition
+```
+
+The encoder computes the target vector once per observation. Every timestep in the action chunk receives it, both at the input and through the blocks' adaptive modulation. An empty graph contributes exactly zero. If several nodes have appreciable probability, their attributes contribute in proportion to their scores. Flow-loss gradients reach the target selector through these probabilities even on examples without a target label. The optional `target_id` supervises the classification loss only.
+
+The flag defaults to `false`, which preserves the original network and its checkpoint parameter names. Full graph ablation in the offline evaluator disables both graph-token attention input and the target vector. The closed-loop reach benchmark's `no_edges` condition instead recomputes the prediction with all nodes present and their relations removed.
+
 ## Flow matching
 
 Let `a` be a demonstrated normalized action chunk, and `ε ~ N(0,I)`. The implementation consistently uses:

@@ -11,6 +11,7 @@ model:
     relation_loss_weight: 0.0
     target_loss_weight: 0.25
   action:
+    condition_on_target: true
     dim: 2
     state_dim: 2
     horizon: 4
@@ -19,7 +20,7 @@ model:
     inference_steps: 3
 training:
   manifest: runs/graph-reach/data/manifest.json
-  output_dir: runs/graph-reach/checkpoints
+  output_dir: runs/graph-reach/target-conditioned
   batch_size: 16
   max_steps: 1200
   learning_rate: 0.001
