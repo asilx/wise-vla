@@ -1,5 +1,7 @@
 # Dataset and graph contract
 
+For collection design, supervision sources, episode boundaries at expert takeover and split design across training stages, see [what data WISE-VLA needs](pretraining-and-posttraining-data.md).
+
 ## On-disk layout
 
 A dataset root contains `manifest.json` and one directory per episode. Each episode has `states.npy`, `actions.npy`, `observations.jsonl`, and referenced RGB image files. NumPy arrays are opened with `allow_pickle=False` and memory-mapped; observation metadata is loaded into memory. This simple format is intended as an explicit interchange layer, not a petabyte-scale streaming format.

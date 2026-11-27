@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from dataclasses import replace
 
@@ -116,6 +117,101 @@ def test_training_resume_matches_uninterrupted(config, dataset, tmp_path, condit
         torch.testing.assert_close(a["ema"][key], b["ema"][key], rtol=0, atol=0)
     with pytest.raises(ValueError, match="settings"):
         run_training(copy.deepcopy(config), replace(partial_settings, batch_size=2), resume=resumed)
+
+
+def test_posttraining_from_ema_matches_exported_policy_and_resumes_without_source(
+    config, dataset, tmp_path
+):
+    base = TrainingConfig(
+        manifest=str(dataset.manifest),
+        output_dir=str(tmp_path / "base"),
+        max_steps=4,
+        batch_size=2,
+        warmup_steps=1,
+        ema_decay=0.8,
+        seed=17,
+    )
+    source = run_training(config, base)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    deployed, stats = load_policy_model(source)
+    saved = read_checkpoint(source)
+    assert any(not torch.equal(saved["model"][k], v) for k, v in saved["ema"].items())
+    exported = tmp_path / "export.pt"
+    save_checkpoint(exported, deployed, stats=stats)
+
+    target_data = make_demo_dataset(tmp_path / "target", episodes=4, length=4)
+    new_dataset = EpisodeDataset(target_data, config.action.horizon, split="train")
+    actions_path = new_dataset.episodes[0]["path"] / "actions.npy"
+    np.save(actions_path, np.load(actions_path) + 0.5)
+    assert fit_stats(new_dataset) != stats
+    stage_config = copy.deepcopy(config)
+    stage_config.graph.relation_loss_weight = 0.0
+    stage = replace(
+        base,
+        manifest=str(target_data),
+        output_dir=str(tmp_path / "stage"),
+        max_steps=3,
+        batch_size=3,
+        seed=55,
+    )
+    stage_ckpt = run_training(stage_config, stage, init_from=source, stop_after=1)
+    first = read_checkpoint(stage_ckpt)
+    origin = {"checkpoint_sha256": digest, "step": 4, "weights": "ema"}
+    assert first["trainer"]["init_from"] == origin
+    assert first["trainer"]["step"] == first["scheduler"]["last_epoch"] == 1
+    assert {v["step"].item() for v in first["optimizer"]["state"].values()} == {1}
+    assert NormalizationStats(**first["normalization"]) == stats
+    assert first["trainer"]["manifest_sha256"] != saved["trainer"]["manifest_sha256"]
+    with pytest.raises(ValueError, match="unused output"):
+        run_training(stage_config, stage, init_from=source)
+    source.unlink()
+    resumed = read_checkpoint(run_training(stage_config, stage, resume=stage_ckpt))
+    assert resumed["trainer"]["init_from"] == origin
+    assert resumed["trainer"]["step"] == 3
+    # An inference-only export contains the deployed weights and no optimizer, EMA or RNG.
+    full = read_checkpoint(
+        run_training(
+            stage_config,
+            replace(stage, output_dir=str(tmp_path / "export-stage")),
+            init_from=exported,
+        )
+    )
+    assert full["trainer"]["init_from"]["weights"] == "model"
+    for group in ("model", "ema"):
+        for key, value in full[group].items():
+            torch.testing.assert_close(value, resumed[group][key], rtol=0, atol=0, msg=key)
+
+
+def test_new_stage_checks_output_architecture_and_demo_dimensions(model, config, dataset, tmp_path):
+    stats = fit_stats(dataset)
+    source = tmp_path / "parent" / "latest.pt"
+    save_checkpoint(source, model, stats=stats)
+    stage = TrainingConfig(manifest=str(dataset.manifest), output_dir=str(tmp_path / "stage"))
+    with pytest.raises(ValueError, match="either"):
+        run_training(config, stage, init_from=source, resume=source)
+    with pytest.raises(ValueError, match="separate"):
+        run_training(config, replace(stage, output_dir=str(source.parent)), init_from=source)
+    claimed = tmp_path / "claimed"
+    claimed.mkdir()
+    (claimed / "training_config.json").write_text("another stage")
+    with pytest.raises(ValueError, match="unused output"):
+        run_training(config, replace(stage, output_dir=str(claimed)), init_from=source)
+    assert (claimed / "training_config.json").read_text() == "another stage"
+    changed = copy.deepcopy(config)
+    changed.action.horizon += 1
+    with pytest.raises(ValueError, match="configuration mismatch"):
+        run_training(changed, stage, init_from=source)
+    changed_stats = replace(stats, action_mean=[10.0] * config.action.dim)
+    changed_stats.save(tmp_path / "different.json")
+    with pytest.raises(ValueError, match="normalization"):
+        run_training(
+            config, replace(stage, normalization=str(tmp_path / "different.json")), init_from=source
+        )
+    actions_path = dataset.episodes[-1]["path"] / "actions.npy"
+    np.save(actions_path, np.load(actions_path)[:, :-1])
+    with pytest.raises(ValueError, match="dimensions"):
+        run_training(config, stage, init_from=source)
+    assert not (tmp_path / "stage").exists()
 
 
 def test_tiny_model_learns_fixed_flow_batch(model, batch):

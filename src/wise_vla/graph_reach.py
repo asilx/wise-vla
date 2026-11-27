@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from PIL import Image, ImageDraw
 
+from .checkpoint import checkpoint_sha256
 from .graph import WorldGraph
 from .policy import WISEPolicy
 
@@ -73,20 +74,25 @@ class Layout:
         return position, outcome
 
 
-def _demonstration(directory, layout, goal):
+def _expert_trajectory(layout, goal, position):
+    trajectory = []
+    for _ in range(MAX_STEPS):
+        action = layout.displacement(layout.bins[goal] - position)
+        trajectory.append((position, action))
+        position, outcome = layout.step(position, action, goal)
+        if outcome:
+            return trajectory if outcome == "success" else []
+    return []
+
+
+def _write_demonstration(directory, layout, goal, trajectory):
     directory.mkdir()
-    states, actions = [], []
-    position = layout.start
     graph = layout.graph(goal)
     # The existing target loss reads this label. Online observations omit it.
     graph["target_id"] = f"bin{goal}"
     (directory / "graph.json").write_text(json.dumps(graph))
     with (directory / "observations.jsonl").open("w") as rows:
-        for index in range(MAX_STEPS):
-            direction = layout.bins[goal] - position
-            action = layout.displacement(direction)
-            states.append(position)
-            actions.append(action)
+        for index, (position, _) in enumerate(trajectory):
             filename = f"{index:03d}.png"
             layout.render(position).save(directory / filename)
             rows.write(
@@ -95,22 +101,47 @@ def _demonstration(directory, layout, goal):
                 )
                 + "\n"
             )
-            position, outcome = layout.step(position, action, goal)
-            if outcome == "success":
-                break
-        else:
-            raise RuntimeError("Expert did not reach the goal")
+    states, actions = zip(*trajectory)
     np.save(directory / "states.npy", np.asarray(states, dtype=np.float32))
     np.save(directory / "actions.npy", np.asarray(actions, dtype=np.float32))
 
 
-def generate(output, *, train_pairs=32, val_pairs=8, seed=42):
-    """Keep both counterfactual episodes of a layout in the same split."""
+def _collect_correction(staged, name, layout, goal, policy, noise_seeds):
+    visited = []
+    outcome, _ = _rollout(policy, layout, goal, layout.graph(goal), noise_seeds, visited=visited)
+    # Project each learner state onto the finite nominal path, including its endpoints.
+    direction = layout.bins[goal] - layout.start
+    offsets = np.asarray(visited) - layout.start
+    progress = np.clip((offsets @ direction) / (direction @ direction), 0, 1)
+    deviation = np.linalg.norm(offsets - progress[:, None] * direction, axis=1)
+    for step in np.argsort(-deviation, kind="stable"):
+        if deviation[step] <= 1e-6:
+            break
+        trajectory = _expert_trajectory(layout, goal, visited[step])
+        if trajectory:
+            episode = name + "_recovery"
+            _write_demonstration(staged / episode, layout, goal, trajectory)
+            return {
+                "id": episode,
+                "path": episode,
+                "split": "train",
+                "kind": "recovery",
+                "nominal_episode": name,
+                "takeover_step": int(step),
+                "learner_outcome": outcome,
+            }
+    return None
+
+
+def generate(output, *, train_pairs=32, val_pairs=8, seed=42, policy=None, source_sha256=None):
+    """Write paired demonstrations and optionally add expert recoveries on training layouts."""
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError(output)
     if min(train_pairs, val_pairs) < 1 or seed < 0:
         raise ValueError("Use positive pair counts and a nonnegative seed")
+    if policy is not None:
+        _check_policy_dimensions(policy)
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as temp:
         staged = Path(temp) / "dataset"
@@ -119,20 +150,45 @@ def generate(output, *, train_pairs=32, val_pairs=8, seed=42):
         for split, pairs in [("train", train_pairs), ("val", val_pairs)]:
             for i in range(pairs):
                 layout = Layout.sample(seed, split, i)
+                collect = policy is not None and split == "train"
+                if collect:
+                    noise_seeds = np.random.default_rng([seed, 4, i]).integers(
+                        2**31, size=MAX_STEPS
+                    )
                 for goal in (0, 1):
                     name = f"{split}_{i:05d}_{goal}"
-                    _demonstration(staged / name, layout, goal)
-                    episodes.append({"id": name, "path": name, "split": split})
+                    nominal = _expert_trajectory(layout, goal, layout.start)
+                    if not nominal:
+                        raise RuntimeError("Expert did not reach the goal from the nominal start")
+                    _write_demonstration(staged / name, layout, goal, nominal)
+                    entry = {"id": name, "path": name, "split": split}
+                    if policy is not None:
+                        entry["kind"] = "nominal"
+                    episodes.append(entry)
+                    if collect:
+                        recovery = _collect_correction(
+                            staged, name, layout, goal, policy, noise_seeds
+                        )
+                        if recovery is not None:
+                            episodes.append(recovery)
         manifest = {"schema_version": 1, "task": "graph_reach", "seed": seed, "episodes": episodes}
+        if policy is not None:
+            manifest["collection"] = {
+                "checkpoint_sha256": source_sha256,
+                "training_rollouts": 2 * train_pairs,
+                "recovery_episodes": sum(e["kind"] == "recovery" for e in episodes),
+            }
         (staged / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         staged.rename(output)
     return output / "manifest.json"
 
 
-def _rollout(policy, layout, goal, graph, noise_seeds):
+def _rollout(policy, layout, goal, graph, noise_seeds, *, visited=None):
     policy.reset()
     position = layout.start
     for i, seed in enumerate(noise_seeds, 1):
+        if visited is not None:
+            visited.append(position.copy())
         action = policy.act(
             images={"top": layout.render(position)},
             instruction=INSTRUCTION,
@@ -146,12 +202,16 @@ def _rollout(policy, layout, goal, graph, noise_seeds):
     return "timeout", len(noise_seeds)
 
 
-def benchmark(policy, *, pairs=16, seed=42):
-    if pairs < 1 or seed < 0:
-        raise ValueError("Use a positive pair count and a nonnegative seed")
+def _check_policy_dimensions(policy):
     cfg = policy.model.config.action
     if (cfg.state_dim, cfg.dim) != (2, 2):
         raise ValueError("Graph reach requires a checkpoint with 2D state and displacement")
+
+
+def benchmark(policy, *, pairs=16, seed=42):
+    if pairs < 1 or seed < 0:
+        raise ValueError("Use a positive pair count and a nonnegative seed")
+    _check_policy_dimensions(policy)
     runs = []
     for i in range(pairs):
         layout = Layout.sample(seed, "test", i)
@@ -188,23 +248,39 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     data = commands.add_parser("generate", help="Write expert demonstrations in WISE format")
-    data.add_argument("--output", type=Path, required=True)
-    data.add_argument("--train-pairs", type=int, default=32)
-    data.add_argument("--val-pairs", type=int, default=8)
+    collect = commands.add_parser(
+        "collect-corrections", help="Add expert recoveries from learner rollouts"
+    )
+    for sub in (data, collect):
+        sub.add_argument("--output", type=Path, required=True)
+        sub.add_argument("--train-pairs", type=int, default=32)
+        sub.add_argument("--val-pairs", type=int, default=8)
     run = commands.add_parser("evaluate", help="Run paired rollouts on held-out layouts")
-    run.add_argument("--checkpoint", required=True)
+    for sub in (collect, run):
+        sub.add_argument("--checkpoint", type=Path, required=True)
+        sub.add_argument("--device", default="cpu")
     run.add_argument("--pairs", type=int, default=16)
-    run.add_argument("--device", default="cpu")
     run.add_argument("--output", type=Path)
-    for sub in (data, run):
+    for sub in (data, collect, run):
         sub.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    if args.command == "generate":
-        print(
-            generate(
-                args.output, train_pairs=args.train_pairs, val_pairs=args.val_pairs, seed=args.seed
-            )
+    if args.command in {"generate", "collect-corrections"}:
+        policy, digest = None, None
+        if args.command == "collect-corrections":
+            with args.checkpoint.open("rb") as stream:
+                digest = checkpoint_sha256(stream)
+                policy = WISEPolicy.from_checkpoint(stream, device=args.device)
+        manifest = generate(
+            args.output,
+            train_pairs=args.train_pairs,
+            val_pairs=args.val_pairs,
+            seed=args.seed,
+            policy=policy,
+            source_sha256=digest,
         )
+        if policy is not None:
+            print(json.dumps(json.loads(manifest.read_text())["collection"]))
+        print(manifest)
     else:
         policy = WISEPolicy.from_checkpoint(args.checkpoint, device=args.device)
         result = benchmark(policy, pairs=args.pairs, seed=args.seed)

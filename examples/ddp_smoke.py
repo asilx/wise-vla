@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", default="runs/ddp-smoke")
+    parser.add_argument("--init-from")
     args = parser.parse_args()
     train = TrainingConfig(
         manifest=args.manifest,
@@ -24,7 +25,7 @@ def main():
         log_every=1,
     )
     try:
-        run_training(tiny_config(), train)
+        run_training(tiny_config(), train, init_from=args.init_from)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

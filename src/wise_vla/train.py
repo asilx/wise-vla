@@ -15,7 +15,14 @@ import yaml
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 
-from .checkpoint import EMA, read_checkpoint, restore_weights, save_checkpoint
+from .checkpoint import (
+    EMA,
+    check_model_config,
+    checkpoint_sha256,
+    read_checkpoint,
+    restore_weights,
+    save_checkpoint,
+)
 from .config import WISEConfig
 from .data.dataset import EpisodeDataset, PolicyCollator, batch_to
 from .data.normalization import NormalizationStats, fit_stats
@@ -75,7 +82,55 @@ def restore_rng(state, device):
         torch.cuda.set_rng_state(state["cuda"], device)
 
 
-def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop_after=None):
+def _save_run_settings(output, config, train, stats, *, new_stage, rank, distributed):
+    error = [None]
+    if rank == 0:
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            if new_stage and any(
+                (output / name).exists() for name in ("latest.pt", "metrics.jsonl")
+            ):
+                raise FileExistsError(output)
+            # An exclusive create also protects two new stages racing for the same directory.
+            with (output / "training_config.json").open("x" if new_stage else "w") as stream:
+                json.dump(asdict(train), stream, indent=2)
+            config.save(output / "model_config.yaml")
+            stats.save(output / "normalization.json")
+        except OSError as exc:
+            if new_stage and isinstance(exc, FileExistsError):
+                error[0] = "Use a separate, unused output directory for the new stage"
+            else:
+                error[0] = f"Could not write training settings in {output}: {exc}"
+    if distributed:
+        dist.broadcast_object_list(error, src=0)
+    if error[0] is not None:
+        raise ValueError(error[0])
+
+
+def run_training(
+    config: WISEConfig, train: TrainingConfig, *, resume=None, init_from=None, stop_after=None
+):
+    if resume is not None and init_from is not None:
+        raise ValueError("Choose either resume or init_from")
+    output = Path(train.output_dir)
+    latest = output / "latest.pt"
+    new_stage = init_from is not None
+    origin = None
+    if new_stage:
+        if Path(init_from).resolve().parent == output.resolve():
+            raise ValueError("Use a separate, unused output directory for the new stage")
+        with Path(init_from).open("rb") as stream:
+            digest = checkpoint_sha256(stream)
+            payload = read_checkpoint(stream)
+        origin = {
+            "checkpoint_sha256": digest,
+            "step": payload["trainer"].get("step"),
+            "weights": "ema" if payload["ema"] is not None else "model",
+        }
+    else:
+        payload = read_checkpoint(resume) if resume is not None else None
+        if payload:
+            origin = payload["trainer"].get("init_from")
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if distributed and not dist.is_initialized():
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
@@ -85,20 +140,31 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
     )
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    payload = read_checkpoint(resume) if resume else None
+    if distributed and new_stage:
+        sources = [None] * world
+        dist.all_gather_object(sources, origin["checkpoint_sha256"])
+        if len(set(sources)) != 1:
+            raise ValueError("All ranks must initialize from the same source checkpoint")
     if payload:
         if config.vlm.revision == "main":
             # Restore the resolved model version before performing any Hub download.
             config.vlm.revision = payload["config"]["vlm"]["revision"]
-        if config != WISEConfig(**payload["config"]):
-            raise ValueError("Checkpoint/model configuration mismatch")
+        check_model_config(config, payload, new_stage=new_stage)
     torch.manual_seed(train.seed)  # identical initial parameters across ranks
     model = WISEVLA(config).to(device)
     if payload:
-        restore_weights(model, payload)
+        restore_weights(model, payload, use_ema=new_stage, new_stage=new_stage)
     dataset = EpisodeDataset(train.manifest, config.action.horizon, split=train.train_split)
     if len(dataset) < world:
         raise ValueError("Dataset must have at least world_size timesteps")
+    for episode in dataset.episodes:
+        if (episode["state_dim"], episode["action_dim"]) != (
+            config.action.state_dim,
+            config.action.dim,
+        ):
+            raise ValueError(
+                f"State/action dimensions do not match the policy in episode {episode['id']}"
+            )
     stats = (
         NormalizationStats(**payload["normalization"])
         if payload
@@ -106,6 +172,8 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
         if train.normalization
         else fit_stats(dataset)
     )
+    if new_stage and train.normalization and NormalizationStats.load(train.normalization) != stats:
+        raise ValueError("The new stage must use the source checkpoint's normalization")
     sampler = DistributedSampler(
         dataset, num_replicas=world, rank=rank, shuffle=True, seed=train.seed, drop_last=False
     )
@@ -138,7 +206,7 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
         for k, v in asdict(train).items()
         if k not in {"output_dir", "checkpoint_every", "log_every", "normalization"}
     }
-    if payload:
+    if resume is not None:
         previous = payload["trainer"]
         if previous["world_size"] != world or previous["training_signature"] != signature:
             raise ValueError("Resume requires matching world size and training settings")
@@ -148,12 +216,10 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
         scheduler.load_state_dict(payload["scheduler"])
         ema.shadow = {n: p.to(device) for n, p in payload["ema"].items()}
         epoch, offset, step = previous["epoch"], previous["batch_offset"], previous["step"]
-    output = Path(train.output_dir)
+    _save_run_settings(
+        output, config, train, stats, new_stage=new_stage, rank=rank, distributed=distributed
+    )
     if rank == 0:
-        output.mkdir(parents=True, exist_ok=True)
-        config.save(output / "model_config.yaml")
-        stats.save(output / "normalization.json")
-        (output / "training_config.json").write_text(json.dumps(asdict(train), indent=2))
         print(
             json.dumps(
                 {"parameters": model.parameter_counts(), "device": str(device), "world_size": world}
@@ -170,8 +236,9 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
         else model
     )
     torch.manual_seed(train.seed + rank)
-    if payload and payload["rng_states"]:
+    if resume is not None and payload["rng_states"]:
         restore_rng(payload["rng_states"][rank], device)
+    del payload
     model.train()
     optimizer.zero_grad(set_to_none=True)
     sampler.set_epoch(epoch)
@@ -182,7 +249,6 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
     if amp and not torch.cuda.is_bf16_supported():
         raise ValueError("bf16 AMP requires a supported GPU; set training.amp=false")
     limit = train.max_steps if stop_after is None else min(stop_after, train.max_steps)
-    latest = output / "latest.pt"
 
     def checkpoint():
         local_rng = rng_state(device)
@@ -204,6 +270,7 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
                     "world_size": world,
                     "training_signature": signature,
                     "manifest_sha256": manifest_hash,
+                    **({"init_from": origin} if origin is not None else {}),
                 },
                 rng_states=states,
             )
@@ -275,7 +342,9 @@ def run_training(config: WISEConfig, train: TrainingConfig, *, resume=None, stop
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--resume")
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--resume", help="Continue this training run from its checkpoint")
+    inputs.add_argument("--init-from", help="Start a fresh stage from a WISE policy checkpoint")
     args = parser.parse_args()
     values = yaml.safe_load(Path(args.config).read_text())
     try:
@@ -283,6 +352,7 @@ def main():
             WISEConfig(**values["model"]),
             TrainingConfig(**values.get("training", {})),
             resume=args.resume,
+            init_from=args.init_from,
         )
     finally:
         if dist.is_initialized():

@@ -28,6 +28,8 @@ flowchart TD
 
 See [architecture and equations](docs/architecture.md), [data format](docs/data.md), and [training](docs/training.md).
 
+Planning data collection for a new robot? Start with [what to collect for pre-training and post-training](docs/pretraining-and-posttraining-data.md). It covers aligned robot commands, causal knowledge-graph annotations, expert takeovers and how to split recordings across stages.
+
 ## Quick start: no GPU or model download
 
 Python 3.10–3.12 is covered by the project configuration; Python 3.10 and 3.12 are the CI targets. Install a suitable PyTorch build first.
@@ -66,6 +68,20 @@ wise-vla-graph-reach evaluate --checkpoint runs/graph-reach/target-conditioned/l
 ```
 
 The CPU recipe enables predicted-target conditioning and uses the tiny backbone with 32 training layouts (64 demonstrations). The generator also writes eight validation layouts. Evaluation samples a separate test set. The report gives success per episode and the fraction of layouts on which the policy reaches **both** correct goals when the relation switches. [Matched baseline and target-conditioned rollouts](docs/validation.md#predicted-target-conditioning-2026-11-25)
+
+## Post-train on expert recoveries
+
+From the checkpoint above, roll out the policy on the training layouts and collect expert trajectories starting at positions the policy actually visited. Each trajectory contains the expert's commands from takeover onward. The new manifest includes nominal replay and a separate validation split.
+
+```bash
+BASE=runs/graph-reach/target-conditioned/latest.pt
+wise-vla-graph-reach collect-corrections --checkpoint "$BASE" --output runs/graph-reach/corrections
+wise-vla-train --config configs/graph_reach_posttrain.yaml --init-from "$BASE"
+wise-vla-graph-reach evaluate --checkpoint runs/graph-reach/posttrained/latest.pt \
+  --pairs 64 --seed 20261127 --output runs/graph-reach/posttrained/rollouts.json
+```
+
+The fine-tuning stage inherits the deployed weights and normalization and starts its own optimizer schedule. The same trainer accepts a WISE manifest of human expert takeovers on a robot. [Matched closed-loop results](docs/validation.md#corrective-post-training-2026-11-27)
 
 ## Train on a LeRobot recording
 

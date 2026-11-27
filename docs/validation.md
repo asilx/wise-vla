@@ -1,5 +1,31 @@
 # Validation record
 
+## Corrective post-training (2026-11-27)
+
+We tested whether expert takeovers help the policy finish a reach after drifting away from the demonstrated path. Two tiny CPU policies trained for 1,200 steps supplied the starting checkpoints (training seeds 42 and 43). From each checkpoint we ran two matched 600-step fine-tunes. Both started from the same EMA weights and normalization, with fresh AdamW, peak LR 0.0004, 20 warmup steps, batch size 16 and EMA decay 0.97. One used only the 64 original demonstrations. The other also used expert recoveries from that source policy's training-layout rollouts.
+
+Each collector added 64 recovery episodes on the same 32 training layouts. The nominal trajectories contained 313 training timesteps. The recoveries added 240 timesteps for seed 42 and 225 for seed 43. The collector queried the expert only to produce action labels after takeover. It received the directed relation through the normal policy interface during learner rollouts. The separate eight validation layouts supplied no recoveries.
+
+We evaluated the source checkpoint and both fine-tunes on the same 64 held-out layouts per rollout seed, each with two possible goals. Seed 2026 repeats an earlier test set and 20261127 generates a fresh set. All conditions used the original radius, 16-step limit and paired action noise. Each success count below is out of 128 episodes.
+
+| Training seed | Rollout seed | Source, full graph | Nominal fine-tune, full graph | Corrective fine-tune, full graph | Corrective fine-tune, edges removed |
+|---:|---:|---:|---:|---:|---:|
+| 42 | 2026 | 89 | 92 | 115 | 38 |
+| 42 | 20261127 | 90 | 94 | 115 | 43 |
+| 43 | 2026 | 91 | 91 | 107 | 35 |
+| 43 | 20261127 | 92 | 88 | 108 | 46 |
+
+| Across both training and rollout seeds | Source | Nominal fine-tune | Corrective fine-tune |
+|---|---:|---:|---:|
+| Correct bin reached with the full graph | 362/512 (70.7%) | 365/512 (71.3%) | 445/512 (86.9%) |
+| Timeouts with the full graph | 150 | 147 | 67 |
+| Both goal assignments solved with the full graph | 129/256 | 132/256 | 195/256 |
+| Correct bin reached with the edges removed | 4/512 | 9/512 | 162/512 |
+
+Compared with the nominal fine-tune, the corrective policy solved 86 previously missed trials and lost six previously solved trials, a net gain of 80/512 (15.6 percentage points). All full-graph failures were timeouts. With the relation removed, every policy solved zero pairs on both goal assignments. Counts pool repeated evaluations of the same layouts across training seeds. These measurements cover synthetic 2D reaching with the tiny backbone. Real-robot manipulation and post-training with the full Qwen backbone require separate trials.
+
+To reproduce, use layout generation seed 42 throughout. Set `training.seed` to 42 or 43 in both training recipes, keeping each run in its own directory. Collect recoveries with its matching source checkpoint. For the nominal control, use the same post-training recipe and `--init-from` checkpoint, changing the manifest back to `runs/graph-reach/data/manifest.json` and choosing a separate output directory. Evaluate each checkpoint with `--pairs 64` and both rollout seeds above. [Runnable commands](../README.md#post-train-on-expert-recoveries)
+
 ## Predicted-target conditioning (2026-11-25)
 
 The question was whether feeding the predicted target's numeric attributes to the action expert would help it act on the `inside` relation. The control already had the same target head, target labels during training and graph-token attention. We switched on `model.action.condition_on_target` for the intervention. This adds 1,024 weights in the tiny model. Both versions used the same 64 demonstrations, training budget (1,200 optimizer steps), EMA settings and action sampler.

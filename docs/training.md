@@ -51,6 +51,14 @@ wise-vla-eval --checkpoint runs/qwen3-2b/latest.pt \
 
 All relative paths in configuration files are relative to the process working directory. Commands above assume the repository root. Validation is an explicit offline command rather than a hidden training-side job. Only the latest checkpoint is retained; copy snapshots you wish to keep or use distinct output directories.
 
+## Starting a new training stage
+
+Use `wise-vla-train --config downstream.yaml --init-from runs/base/latest.pt` to adapt a WISE checkpoint to a new manifest. Set a fresh output directory and the new update budget in the downstream configuration. The trainer starts from the same policy weights used for deployment (EMA when present, otherwise the saved model). It keeps the source state/action normalization and initializes AdamW, the scheduler, EMA, sampler, and random streams for the new run. The new checkpoint records the source file's SHA-256, its optimizer step when available, and the weight variant used.
+
+Keep the same architecture, backbone revision, graph vocabulary, control semantics and model settings across stages. The three graph objective settings (`relation_loss_weight`, `target_loss_weight`, `relation_mask_probability`) may change to match the new annotations. Omit `training.normalization` or supply statistics equal to the source checkpoint's. An interrupted downstream run can resume directly from its own `latest.pt` with `--resume`. [Pre-training and post-training dataset guide](pretraining-and-posttraining-data.md)
+
+In Graph Reach, `collect-corrections` rolls out the source policy on both goals of each training layout. It ranks the pre-action positions by distance to the straight nominal path segment, including overshoots past the goal. Starting at the most distant recoverable position, the expert executes consecutive commands until it reaches the correct bin. A coincident path adds zero recoveries. A candidate that would reach the wrong bin or time out is skipped. The collector retains every nominal demonstration and generates nominal-only validation layouts from the separate validation stream. Its manifest records the source fingerprint, recovery count, and each recovery's nominal episode, takeover step and learner outcome. `takeover_step` counts learner actions already executed at the saved state. [Runnable CPU example](../README.md#post-train-on-expert-recoveries)
+
 ## Optimizer and precision
 
 Training uses AdamW, configurable gradient accumulation, finite-loss checks, gradient clipping, linear warmup followed by cosine decay to 10% of the peak LR, and EMA of trainable parameters. CUDA bf16 AMP is enabled by default when `training.amp` is true; unsupported devices receive a clear error. CPU training uses fp32. There is no fp16 GradScaler path. Effective global batch size is `batch_size × grad_accumulation × world_size` except for short terminal batches.

@@ -1,5 +1,6 @@
 """Atomic resumable checkpoints; frozen pretrained weights are referenced, not copied."""
 
+import hashlib
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -86,9 +87,28 @@ def read_checkpoint(path):
     return payload
 
 
-def restore_weights(model, payload, *, use_ema=False):
-    if model.config != WISEConfig(**payload["config"]):
+def checkpoint_sha256(stream):
+    """Fingerprint the same open file that will be loaded, even if latest.pt is replaced."""
+    digest = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(block)
+    stream.seek(0)
+    return digest.hexdigest()
+
+
+def check_model_config(config, payload, *, new_stage=False):
+    saved = WISEConfig(**payload["config"])
+    if new_stage:
+        # A new dataset may have different graph supervision coverage.
+        saved.graph.relation_loss_weight = config.graph.relation_loss_weight
+        saved.graph.target_loss_weight = config.graph.target_loss_weight
+        saved.graph.relation_mask_probability = config.graph.relation_mask_probability
+    if config != saved:
         raise ValueError("Checkpoint/model configuration mismatch")
+
+
+def restore_weights(model, payload, *, use_ema=False, new_stage=False):
+    check_model_config(model.config, payload, new_stage=new_stage)
     incompat = model.load_state_dict(payload["model"], strict=False)
     allowed_missing = {name for name in model.state_dict() if name.startswith("backbone.")}
     missing = set(incompat.missing_keys)

@@ -24,4 +24,8 @@ jobs:
       - run: torchrun --standalone --nproc-per-node=2 examples/ddp_smoke.py --manifest runs/ci-demo/manifest.json --output runs/ci-ddp
         env:
           OMP_NUM_THREADS: '1'
+      - name: Post-train a saved policy with two CPU ranks
+        run: torchrun --standalone --nproc-per-node=2 examples/ddp_smoke.py --manifest runs/ci-demo/manifest.json --output runs/ci-posttrain --init-from runs/ci-demo/checkpoints/latest.pt
+        env:
+          OMP_NUM_THREADS: '1'
       - run: python -m build
